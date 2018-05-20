@@ -1,3 +1,28 @@
+-- |
+-- @travis-ci.com@ webhook authentication middleware.
+--
+-- See <https://docs.travis-ci.com/user/notifications/#Configuring-webhook-notifications>
+-- for more information about webhooks.
+--
+-- In brief:
+--
+--     * Configure @travis-ci.com@ to send webhook notifications to your
+--       @WAI@-based web server (such as @<https://hackage.haskell.org/package/warp warp>@).
+--     * Use the 'authenticate' middleware to reject requests that don't
+--       originate from @travis-ci.com@.
+--
+-- For example,
+--
+-- > -- In .travis.yml
+-- > notifications:
+-- >   webhooks: http://my-domain.com/my-webhook-path
+--
+-- @
+-- -- In code
+-- TravisCI.'authenticate' ["my-webhook-path"]
+-- @
+--
+-- See the bottom of this module for a longer example.
 {-# language LambdaCase          #-}
 {-# language OverloadedStrings   #-}
 {-# language ScopedTypeVariables #-}
@@ -36,17 +61,7 @@ import qualified Data.ByteString.Lazy as Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LazyByteString (stripPrefix, toStrict)
 import qualified Data.Vault.Lazy as Vault (Key, insert, lookup, newKey)
 
--- | Middleware that authenticates a webhook @POST@ from
--- <https://travis-ci.com/> to the given path.
---
--- For example, to authenticate webhooks to @/travis@, use
---
--- @
--- TravisCI.authenticate ["travis"]
--- @
---
--- See <https://docs.travis-ci.com/user/notifications/#Configuring-webhook-notifications>
--- for more information about webhooks.
+-- | Only allow @travis-ci.com@ to @POST@ to the given path.
 authenticate :: [Text] -> Middleware
 authenticate path app request respond
   | pathInfo request == path && requestMethod request == methodPost =
@@ -96,7 +111,7 @@ authenticate_ request = do
 -- | Retrieve the payload from an authenticated 'Request'.
 --
 -- This function /must/ be called on a 'Request' that was handled by the
--- 'authenticate' middleware. Otherwise, it will throw a 'VaultNoValue'
+-- 'authenticate' middleware. Otherwise, it will throw a 'TravisNoValue'
 -- exception.
 payload :: Request -> IO Value
 payload request =
@@ -120,16 +135,59 @@ travisPublicKey =
     , public_e = 65537
     }
 
+-- |
 data TravisException
   = TravisNoParse Request
     -- ^ JSON-decoding an authenticated payload failed. This should never
     -- happen; it means Travis CI signed and sent a payload that was not valid
     -- JSON.
   | TravisNoValue Request
-    -- ^ A call to 'payload' failed because there was no 'Value' inserted by
-    -- the 'authenticate' middleware. This should never happen, but if it does,
-    -- it's your fault, because you called 'payload' on a 'Request' that
-    -- did not pass through the 'authenticate' middleware.
+    -- ^ A call to 'payload' failed because there was no 'Value' inserted into
+    -- the request vault by the 'authenticate' middleware. This should never
+    -- happen, but if it does, it's your fault; it means you called 'payload'
+    -- on a 'Request' that did not pass through the 'authenticate' middleware.
   deriving Show
 
 instance Exception TravisException
+
+-- $example
+--
+-- @
+-- {-\# language OverloadedStrings #-}
+--
+-- import Network.Wai                    -- wai
+-- import Network.Wai.Handler.Warp (run) -- warp
+-- import Network.HTTP.Types             -- http-types
+--
+-- import qualified Network.Wai.Middleware.TravisCI as TravisCI
+--
+-- main :: IO ()
+-- main =
+--   'Network.Wai.Handler.Warp.run' 8000 (middleware app)
+--
+-- middleware :: 'Network.Wai.Middleware'
+-- middleware =
+--   TravisCI.'authenticate' ["travis"]         -- (1)
+--
+-- app :: 'Network.Wai.Application'
+-- app request respond =
+--   case 'Network.Wai.pathInfo' request of
+--     ["travis"] -> do                       -- (2)
+--       payload <- TravisCI.'payload' request  -- (3)
+--       print payload
+--     _ -> pure ()
+--   respond ('Network.Wai.responseLBS' 'Networh.HTTP.Types.status200' [] "")
+-- @
+--
+-- Above is a minimal @WAI@ application that authenticates @POST@s to @/travis@,
+-- then prints out the parsed payload (an @aeson@ 'Value').
+--
+-- * At @(1)@, we define the middleware, which authenticates every @POST@ to
+--   @/travis@.
+--
+-- * At @(2)@, we handle these @POST@s in our application.
+--
+-- * At @(3)@, we parse the JSON payload, whose schema is, unsurprisingly,
+--   barely defined at all. See
+--   <https://docs.travis-ci.com/user/notifications/#Webhooks-Delivery-Format>
+--   for more information.
